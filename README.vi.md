@@ -78,7 +78,8 @@ phiên bản mới ở đó mỗi ngày một lần.
   người dùng `.deb` được đưa tới trang tải về) và app chỉ chấp nhận file có
   chữ ký khớp với khoá công khai gắn sẵn trong app.
 - Cờ dòng lệnh để gán phím tắt từ môi trường desktop: `--capture`,
-  `--capture-full`, `--record`, `--record-full`, `--stop-record`, `--cancel`.
+  `--capture-full`, `--capture-all` (chọn vùng có thể vắt qua nhiều màn hình), `--record`,
+  `--record-full`, `--stop-record`, `--cancel`.
   Các cờ chụp và ghi hình bị bỏ qua cho tới khi bật *Allow command-line
   triggers* trong Settings (nếu không, bất kỳ chương trình nào trên máy cũng có
   thể mượn app này, vốn đã có quyền ghi màn hình, để chụp hộ).
@@ -268,7 +269,13 @@ Có hai công cụ hỗ trợ để chạy tự động toàn bộ luồng:
   Keyboard* cho lệnh `socorin --capture` và bật *Allow command-line
   triggers* trong cài đặt của app; phiên bản đang chạy sẽ nhận lệnh.
   Việc chụp màn hình đi qua D-Bus của GNOME Shell hoặc xdg-desktop-portal,
-  do `xcap` xử lý. Trên X11 mọi thứ chạy native.
+  do `xcap` xử lý. Ghi hình đi qua portal ScreenCast và GStreamer
+  (`gstreamer1.0-tools`, `-pipewire`, `-plugins-good`, `-plugins-ugly`,
+  `-libav`): luôn ghi trọn một màn hình. Record mở hộp thoại chọn màn hình
+  của hệ thống mỗi lần, Record Full Screen ghi nhớ màn hình sau lần đầu; ghi
+  một vùng vẫn cần X11. Với nhiều màn hình, mỗi overlay được đặt
+  fullscreen trên đúng màn hình của nó vì Wayland bỏ qua vị trí cửa sổ. Trên
+  X11 mọi thứ chạy native.
 - **Windows**: không cần cài đặt gì thêm. DPI theo từng màn hình với tỉ lệ
   khác nhau được xử lý bằng cách quy đổi hình học màn hình về đơn vị logical.
 - **Ghi hình trên Windows / Linux** dùng `ffmpeg`. App tìm nó ở các vị trí cài

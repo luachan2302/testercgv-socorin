@@ -97,6 +97,7 @@ pub fn overlay_info<R: Runtime>(app: AppHandle<R>, monitor_id: u32) -> Result<Mo
             session: state.session.load(std::sync::atomic::Ordering::SeqCst),
             preselect_full: false,
             mode: capture::mode(&app),
+            span: capture::span(&app),
         })
         .ok_or_else(|| "no capture session".into())
 }
@@ -124,6 +125,72 @@ pub fn overlay_pixels<R: Runtime>(app: AppHandle<R>, monitor_id: u32) -> Result<
 #[tauri::command(async)]
 pub fn finish_region<R: Runtime>(app: AppHandle<R>, region: Region) -> Result<(), String> {
     capture::finish_region(&app, region)
+}
+
+/// An "all screens" overlay is dragging a selection past its own monitor.
+#[tauri::command]
+pub fn span_update<R: Runtime>(app: AppHandle<R>, monitor_id: u32, rect: Option<capture::SpanRect>) {
+    capture::span_update(&app, monitor_id, rect);
+}
+
+/// `async` like `finish_region`: in editor mode it opens the editor window.
+#[tauri::command(async)]
+pub fn finish_span<R: Runtime>(app: AppHandle<R>, rect: capture::SpanRect) -> Result<(), String> {
+    capture::finish_span(&app, rect)
+}
+
+/// The recording under review (its name and size).
+#[tauri::command]
+pub fn video_info<R: Runtime>(app: AppHandle<R>) -> Result<crate::video::Info, String> {
+    crate::video::info(&app)
+}
+
+/// The recording's bytes, for the review window's player.
+#[tauri::command(async)]
+pub fn video_source<R: Runtime>(app: AppHandle<R>) -> Result<Response, String> {
+    crate::video::bytes(&app).map(Response::new)
+}
+
+/// Writes the trimmed / cropped / muted copy or the GIF; resolves to its name.
+#[tauri::command(async)]
+pub fn video_export<R: Runtime>(app: AppHandle<R>, edit: crate::video::Edit) -> Result<String, String> {
+    crate::video::export(&app, &edit)
+}
+
+/// A new export begins: forget the annotation layers of the previous one.
+#[tauri::command]
+pub fn video_layers_clear<R: Runtime>(app: AppHandle<R>) {
+    crate::video::clear_layers(&app);
+}
+
+/// Body: PNG bytes, one annotation layer as large as the picture.
+#[tauri::command]
+pub fn video_layer_add<R: Runtime>(app: AppHandle<R>, request: Request<'_>) -> Result<(), String> {
+    crate::video::add_layer(&app, raw_body(&request)?)
+}
+
+/// Header `x-socorin-anchor`: the Upload button, where the popover goes.
+/// Uploads the last export (else the recording); resolves to the link.
+#[tauri::command]
+pub async fn video_upload<R: Runtime>(
+    app: AppHandle<R>,
+    window: tauri::Window<R>,
+    request: Request<'_>,
+) -> Result<share::PublicLink, share::ShareError> {
+    let anchor = anchor_header(&window, &request);
+    tauri::async_runtime::spawn_blocking(move || crate::video::upload(&app, anchor))
+        .await
+        .map_err(|e| share::ShareError::new("io", format!("upload: {e}")))?
+}
+
+#[tauri::command]
+pub fn video_reveal<R: Runtime>(app: AppHandle<R>) -> Result<(), String> {
+    crate::video::reveal(&app)
+}
+
+#[tauri::command]
+pub fn video_copy<R: Runtime>(app: AppHandle<R>) -> Result<(), String> {
+    crate::video::copy(&app)
 }
 
 /// The overlay has a selection and is annotating it in place.

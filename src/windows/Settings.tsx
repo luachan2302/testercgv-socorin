@@ -183,6 +183,7 @@ export function Settings() {
       const {
         hotkey,
         fullscreenHotkey,
+        allScreensHotkey,
         recordHotkey,
         saveDir,
         afterCapture,
@@ -201,6 +202,7 @@ export function Settings() {
       const saved = await ipc.updateSettings({
         hotkey,
         fullscreenHotkey,
+        allScreensHotkey,
         recordHotkey,
         saveDir,
         afterCapture,
@@ -369,6 +371,14 @@ export function Settings() {
           <HotkeyField
             value={settings.fullscreenHotkey}
             onChange={(v) => update({ fullscreenHotkey: v })}
+            placeholder="Disabled"
+          />
+        </label>
+        <label className="field">
+          <span>Capture across screens</span>
+          <HotkeyField
+            value={settings.allScreensHotkey}
+            onChange={(v) => update({ allScreensHotkey: v })}
             placeholder="Disabled"
           />
         </label>
@@ -584,7 +594,8 @@ export function Settings() {
           <span>Allow command-line triggers</span>
         </label>
         <p className="hint">
-          Lets <code>socorin --capture</code>, <code>--capture-full</code>, <code>--record</code> and{" "}
+          Lets <code>socorin --capture</code>, <code>--capture-full</code>, <code>--capture-all</code>,{" "}
+          <code>--record</code> and{" "}
           <code>--record-full</code> start a capture (for shortcuts bound in your desktop environment). Off by
           default: with it on, any program on this computer can make Socorin take a screenshot for it.
         </p>

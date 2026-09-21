@@ -103,6 +103,8 @@ windows = { version = "0.62", features = [
 [target.'cfg(target_os = "linux")'.dependencies]
 # Same gtk Tauri links; the file clipboard (text/uri-list) goes through it.
 gtk = "0.18"
+# The ScreenCast portal: how a Wayland session lets the screen be recorded.
+ashpd = { version = "0.13", default-features = false, features = ["tokio", "screencast"] }
 
 [dev-dependencies]
 # `tauri::test` (mock runtime) for the unit tests; never part of the app.

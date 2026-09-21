@@ -111,6 +111,7 @@ pub fn create<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<()> {
         .on_menu_event(|app, event| match event.id().as_ref() {
             "capture" => capture::begin_region(app.clone()),
             "capture_full" => capture::begin_fullscreen(app.clone()),
+            "capture_all" => capture::begin_all_screens(app.clone()),
             "record" => record::begin_region(app.clone()),
             "record_full" => record::begin_fullscreen(app.clone()),
             "stop_copy" => record::stop_async_with(app.clone(), record::Outcome::Copy),
@@ -141,6 +142,7 @@ fn build_items<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<TrayItems<R>> {
     let update_separator = PredefinedMenuItem::separator(app)?;
     let capture_item = MenuItem::with_id(app, "capture", "Capture Region", true, None::<&str>)?;
     let full_item = MenuItem::with_id(app, "capture_full", "Capture Full Screen", true, None::<&str>)?;
+    let all_item = MenuItem::with_id(app, "capture_all", "Capture Across Screens", true, None::<&str>)?;
     let record_item = MenuItem::with_id(app, "record", "Record Region", true, None::<&str>)?;
     let record_full_item =
         MenuItem::with_id(app, "record_full", "Record Full Screen", true, None::<&str>)?;
@@ -151,6 +153,7 @@ fn build_items<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<TrayItems<R>> {
         &[
             &capture_item,
             &full_item,
+            &all_item,
             &PredefinedMenuItem::separator(app)?,
             &record_item,
             &record_full_item,

@@ -89,7 +89,8 @@ that site for a newer version once a day.
   `.AppImage`; `.deb` users are sent to the download page) and the app only
   accepts files whose signature matches the public key built into it.
 - CLI flags for desktop-environment shortcuts: `--capture`, `--capture-full`,
-  `--record`, `--record-full`, `--stop-record`, `--cancel`. The capture and
+  `--capture-all` (a region that may span several monitors), `--record`,
+  `--record-full`, `--stop-record`, `--cancel`. The capture and
   record flags are ignored until *Allow command-line triggers* is switched on
   in Settings (any local program could otherwise use the app, which holds the
   screen-recording permission, to take screenshots for it).
@@ -299,7 +300,13 @@ Two dev aids exist so the whole pipeline can be exercised automatically:
   to `socorin --capture` instead and turn on *Allow command-line triggers*
   in the app's settings; the running instance picks it up.
   Screen capture goes through the GNOME Shell screenshot D-Bus API or the
-  xdg-desktop-portal, which `xcap` handles. On X11 everything works natively.
+  xdg-desktop-portal, which `xcap` handles. Recording goes through the
+  ScreenCast portal and GStreamer (`gstreamer1.0-tools`, `-pipewire`,
+  `-plugins-good`, `-plugins-ugly`, `-libav`): always a whole monitor. Record
+  opens the system's screen chooser every time, Record Full Screen remembers
+  the monitor after the first time; recording a region still needs X11. With
+  several monitors each overlay is made fullscreen on its own monitor, as
+  Wayland ignores window positions. On X11 everything works natively.
 - **Windows**: no special setup. Per-monitor DPI with mixed scale factors is
   handled by normalising monitor geometry to logical units. Recording uses
   Windows Graphics Capture and a Media Foundation H.264 encoder

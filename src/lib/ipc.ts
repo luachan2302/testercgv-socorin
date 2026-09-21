@@ -17,6 +17,35 @@ export interface MonitorInfo {
   preselectFull: boolean;
   /** What the session is for: a screenshot, or picking an area to record. */
   mode: CaptureMode;
+  /** "All screens" session: a drag may continue onto the other monitors. */
+  span: boolean;
+}
+
+/** A rectangle of a recording's picture, in video pixels. */
+export interface VideoCrop {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+}
+
+/** What the review window keeps of a recording (`start` / `end` in seconds). */
+export interface VideoEdit {
+  start: number;
+  end: number;
+  crop: VideoCrop | null;
+  mute: boolean;
+  format: "mp4" | "gif";
+  /** When each annotation layer (sent before with `videoLayerAdd`, same order) is on screen. */
+  layers: { from: number; to: number }[];
+}
+
+/** A selection in desktop logical units; it may cover several monitors. */
+export interface SpanRect {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
 }
 
 export type CaptureMode = "screenshot" | "record";
@@ -82,13 +111,15 @@ export type AfterCapture = "editor" | "clipboard" | "save" | "upload";
 export interface Settings {
   hotkey: string;
   fullscreenHotkey: string;
+  /** Region capture whose selection may span several monitors. Empty = disabled. */
+  allScreensHotkey: string;
   /** Starts a region recording, or stops the running one. Empty = disabled. */
   recordHotkey: string;
   saveDir: string;
   afterCapture: AfterCapture;
   copyOnSave: boolean;
   autostart: boolean;
-  /** Honour --capture / --capture-full / --record / --record-full on the command line. */
+  /** Honour --capture / --capture-full / --capture-all / --record / --record-full on the command line. */
   cliTriggers: boolean;
   filePrefix: string;
   /**
@@ -244,6 +275,27 @@ export const ipc = {
   /** The overlay has painted; Rust shows (and focuses) the window. */
   overlayReady: (monitorId: number) => invoke<void>("overlay_ready", { monitorId }),
   finishRegion: (region: Region) => invoke<void>("finish_region", { region }),
+  /** The recording under review. */
+  videoInfo: () => invoke<{ name: string; bytes: number }>("video_info"),
+  videoSource: () => invoke<ArrayBuffer>("video_source"),
+  /** Writes the edited copy (or GIF) next to the recording; resolves to its file name. */
+  videoExport: (edit: VideoEdit) => invoke<string>("video_export", { edit }),
+  /** A new export begins: drop the layers of the previous one. */
+  videoLayersClear: () => invoke<void>("video_layers_clear"),
+  /** One annotation layer: a transparent PNG as large as the picture. */
+  videoLayerAdd: (png: ArrayBuffer) => invoke<void>("video_layer_add", new Uint8Array(png)),
+  /**
+   * Uploads the last export (else the recording), copies the link and shows
+   * the popover at `anchor` (the Upload button). Rejects with a `ShareError`.
+   */
+  videoUpload: (anchor?: Anchor) =>
+    invoke<SharedLink>("video_upload", new Uint8Array(), anchor && { headers: { "x-socorin-anchor": JSON.stringify(anchor) } }),
+  videoReveal: () => invoke<void>("video_reveal"),
+  videoCopy: () => invoke<void>("video_copy"),
+  /** A drag that left this monitor, for the other overlays to draw (null = dropped). */
+  spanUpdate: (monitorId: number, rect: SpanRect | null) => invoke<void>("span_update", { monitorId, rect }),
+  /** The selection covers several monitors: cut it out of the whole desktop. */
+  finishSpan: (rect: SpanRect) => invoke<void>("finish_span", { rect }),
   /** The overlay switched to in-place annotation for the selected region. */
   beginAnnotation: (monitorId: number) => invoke<void>("begin_annotation", { monitorId }),
   /** Ends the capture session (hides the overlays); same as cancelling. */

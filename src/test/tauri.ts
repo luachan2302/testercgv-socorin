@@ -97,6 +97,7 @@ export const flush = () => new Promise<void>((r) => setTimeout(r, 0));
 export const SETTINGS: Settings = {
   hotkey: "CmdOrCtrl+Shift+A",
   fullscreenHotkey: "",
+  allScreensHotkey: "",
   recordHotkey: "",
   saveDir: "/tmp/shots",
   afterCapture: "editor",

@@ -8,10 +8,13 @@ mod hotkey;
 #[cfg(target_os = "macos")]
 mod macos;
 mod record;
+#[cfg(target_os = "linux")]
+mod screencast;
 mod settings;
 mod share;
 mod tray;
 mod update;
+mod video;
 // The Windows recorder; its geometry and pacing parts are tested everywhere.
 #[cfg_attr(not(windows), allow(dead_code))]
 mod wgc;
@@ -105,6 +108,7 @@ pub(crate) fn configure<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri:
         .manage(record::RecordState::default())
         .manage(update::UpdateState::default())
         .manage(share::ShareState::default())
+        .manage(video::VideoState::default())
         .on_window_event(on_window_event)
         .invoke_handler(tauri::generate_handler![
             commands::platform_info,
@@ -116,6 +120,16 @@ pub(crate) fn configure<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri:
             commands::overlay_pixels,
             commands::overlay_ready,
             commands::finish_region,
+            commands::span_update,
+            commands::finish_span,
+            commands::video_info,
+            commands::video_source,
+            commands::video_export,
+            commands::video_upload,
+            commands::video_layers_clear,
+            commands::video_layer_add,
+            commands::video_reveal,
+            commands::video_copy,
             commands::begin_annotation,
             commands::edit_png,
             commands::save_png_as,
@@ -188,11 +202,14 @@ fn on_window_event<R: tauri::Runtime>(window: &tauri::Window<R>, event: &tauri::
         tauri::WindowEvent::Destroyed if window.label() == windows::EDITOR => {
             capture::forget_pending(window.app_handle());
         }
+        tauri::WindowEvent::Destroyed if window.label() == windows::VIDEO => {
+            video::forget(window.app_handle());
+        }
         _ => {}
     }
 }
 
-/// `--capture` / `--capture-full` trigger a capture, `--record` /
+/// `--capture` / `--capture-full` / `--capture-all` trigger a capture, `--record` /
 /// `--record-full` / `--stop-record` a recording (handy for binding a
 /// desktop-environment shortcut on Wayland, where global hotkeys are not
 /// available); `--minimized` (autostart) stays in the tray; anything else on
@@ -219,6 +236,8 @@ fn handle_cli_args<R: tauri::Runtime>(app: &tauri::AppHandle<R>, args: &[String]
         capture::begin_region(app.clone());
     } else if has("--capture-full") {
         capture::begin_fullscreen(app.clone());
+    } else if has("--capture-all") {
+        capture::begin_all_screens(app.clone());
     } else if has("--cancel") {
         capture::cancel(app);
     } else if has("--record") {
@@ -233,7 +252,7 @@ fn handle_cli_args<R: tauri::Runtime>(app: &tauri::AppHandle<R>, args: &[String]
 }
 
 /// Arguments that start a capture or a recording.
-const TRIGGER_FLAGS: [&str; 4] = ["--capture", "--capture-full", "--record", "--record-full"];
+const TRIGGER_FLAGS: [&str; 5] = ["--capture", "--capture-full", "--capture-all", "--record", "--record-full"];
 
 /// Registers the app as a login item when the setting (on by default) says
 /// so. `enable` rewrites the entry every time, so an app that moved (dragged
@@ -287,6 +306,7 @@ mod tests {
         let session = test_support::start_session(&app, vec![test_support::shot(test_support::geom(1, 0, 0, 8, 8, 1.0, true))]);
         handle_cli_args(&app, &args(&["--capture"]), false);
         handle_cli_args(&app, &args(&["--capture-full"]), false);
+        handle_cli_args(&app, &args(&["--capture-all"]), false);
         handle_cli_args(&app, &args(&["--record"]), false);
         std::thread::sleep(std::time::Duration::from_millis(60));
         assert_eq!(app.state::<capture::AppState>().session.load(std::sync::atomic::Ordering::SeqCst), session);

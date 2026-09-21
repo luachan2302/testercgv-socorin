@@ -25,6 +25,9 @@ pub struct Settings {
     pub hotkey: String,
     /// Global shortcut for full-screen capture. Empty = disabled.
     pub fullscreen_hotkey: String,
+    /// Global shortcut for a region capture whose selection may span several
+    /// monitors. Empty = disabled.
+    pub all_screens_hotkey: String,
     /// Global shortcut that starts a region recording / stops the running
     /// one. Empty = disabled.
     pub record_hotkey: String,
@@ -36,7 +39,7 @@ pub struct Settings {
     pub copy_on_save: bool,
     /// Launch at login. On by default, until the user switches it off.
     pub autostart: bool,
-    /// Honour `--capture`, `--capture-full`, `--record` and `--record-full`
+    /// Honour `--capture`, `--capture-full`, `--capture-all`, `--record` and `--record-full`
     /// on the command line (needed for desktop-environment shortcuts on
     /// Wayland). Off by default: any local program could otherwise make this
     /// app, which holds the screen-recording permission, capture the screen
@@ -85,6 +88,10 @@ pub struct Settings {
     /// there are no accounts). Empty until the first upload registers one;
     /// "Reset install ID" in Settings empties it again.
     pub install_id: String,
+    /// Linux / Wayland: the ScreenCast portal's restore token, so Record
+    /// Full Screen does not ask which monitor every time. The portal
+    /// replaces it on every use.
+    pub screencast_token: String,
 }
 
 impl Default for Settings {
@@ -92,6 +99,7 @@ impl Default for Settings {
         Self {
             hotkey: "CmdOrCtrl+Shift+A".into(),
             fullscreen_hotkey: String::new(),
+            all_screens_hotkey: String::new(),
             record_hotkey: String::new(),
             save_dir: String::new(),
             after_capture: AfterCapture::Editor,
@@ -113,6 +121,7 @@ impl Default for Settings {
             last_version: String::new(),
             upload_server: DEFAULT_UPLOAD_SERVER.into(),
             install_id: String::new(),
+            screencast_token: String::new(),
         }
     }
 }

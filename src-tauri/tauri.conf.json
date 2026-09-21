@@ -25,7 +25,7 @@
       }
     ],
     "security": {
-      "csp": "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' blob: data:; connect-src ipc: http://ipc.localhost; object-src 'none'; base-uri 'none'"
+      "csp": "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' blob: data:; media-src 'self' blob:; connect-src ipc: http://ipc.localhost; object-src 'none'; base-uri 'none'"
     }
   },
   "bundle": {
@@ -64,6 +64,13 @@
           "libwayland-server0",
           "libgbm1",
           "libegl1"
+        ],
+        "recommends": [
+          "gstreamer1.0-tools",
+          "gstreamer1.0-pipewire",
+          "gstreamer1.0-plugins-good",
+          "gstreamer1.0-plugins-ugly",
+          "gstreamer1.0-libav"
         ]
       }
     },

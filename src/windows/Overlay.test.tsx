@@ -20,6 +20,7 @@ const info = (extra: Partial<MonitorInfo> = {}): MonitorInfo => ({
   session: 1,
   preselectFull: false,
   mode: "screenshot",
+  span: false,
   ...extra,
 });
 
@@ -74,7 +75,7 @@ describe("Overlay: session lifecycle", () => {
   it("stays idle until Rust starts a session, then paints and reports ready", async () => {
     const { container } = render(<Overlay monitorId={1} />);
     await flush();
-    expect(tauri.listeners().map((l) => l.event).sort()).toEqual(["capture:lock", "capture:reset", "capture:start", "cursor:move"]);
+    expect(tauri.listeners().map((l) => l.event).sort()).toEqual(["capture:lock", "capture:reset", "capture:span", "capture:start", "cursor:move"]);
     expect(tauri.listeners()[0].target).toEqual({ kind: "WebviewWindow", label: "overlay-1" });
     expect(screen.queryByText(HINT)).toBeNull();
 
@@ -195,6 +196,36 @@ describe("Overlay: selecting", () => {
     expect(tauri.calls("begin_annotation")).toHaveLength(0);
     await drag(10, 10, 50, 50);
     expect(tauri.calls("finish_region")).toHaveLength(1); // finished: further drags ignored
+  });
+
+  it("lets an all-screens drag leave the monitor and hands the desktop rectangle to Rust", async () => {
+    tauri.handlers.span_update = () => undefined;
+    tauri.handlers.finish_span = () => undefined;
+    await startSession({ span: true, x: 1024 }); // jsdom window: 1024 x 768
+    mouse("mouseDown", 100, 100);
+    mouse("mouseMove", 300, 250); // still on this monitor: nothing to mirror
+    expect(tauri.calls("span_update")).toHaveLength(0);
+    mouse("mouseMove", -200, 250); // onto the monitor on the left
+    expect(tauri.calls("span_update")).toEqual([{ monitorId: 1, rect: { x: 824, y: 100, width: 300, height: 150 } }]);
+    mouse("mouseUp", -200, 250);
+    await flush();
+    expect(tauri.calls("finish_span")).toEqual([{ rect: { x: 824, y: 100, width: 300, height: 150 } }]);
+    expect(tauri.calls("finish_region")).toHaveLength(0);
+    expect(tauri.calls("begin_annotation")).toHaveLength(0);
+  });
+
+  it("keeps an all-screens selection on one monitor a plain region, and mirrors a peer's drag", async () => {
+    tauri.handlers.span_update = () => undefined;
+    const { container } = await startSession({ span: true });
+    act(() => tauri.emit("capture:span", { x: -100, y: 50, width: 300, height: 200 }));
+    await flush();
+    expect(ctxOf(container).rect).toHaveBeenCalledWith(-100, 50, 300, 200);
+    act(() => tauri.emit("capture:span", null));
+    mouse("mouseDown", 100, 100);
+    mouse("mouseMove", 300, 250);
+    mouse("mouseUp", 300, 250);
+    expect(tauri.calls("begin_annotation")).toEqual([{ monitorId: 1 }]);
+    expect(tauri.calls("span_update")).toHaveLength(0);
   });
 
   it("shows the error when Rust rejects the region and allows retrying", async () => {

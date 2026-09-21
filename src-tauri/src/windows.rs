@@ -21,6 +21,7 @@ pub const WELCOME: &str = "welcome";
 pub const RECORDER: &str = "recorder";
 pub const UPDATE: &str = "update";
 pub const SHARE: &str = "share";
+pub const VIDEO: &str = "video";
 
 pub fn overlay_label(monitor_id: u32) -> String {
     format!("{OVERLAY_PREFIX}{monitor_id}")
@@ -107,6 +108,48 @@ pub fn start_overlays<R: Runtime>(app: &AppHandle<R>, monitors: &[MonitorInfo]) 
     }
 }
 
+/// Wayland ignores client-side positions, so with several monitors every
+/// overlay would land on the same one. Fullscreen on a given monitor is the
+/// one placement a Wayland client may ask for: request it before the overlay
+/// is shown. (The mock runtime of the tests has no GTK window.)
+#[cfg(all(target_os = "linux", not(test)))]
+pub fn pin_overlay<R: Runtime>(app: &AppHandle<R>, geom: &MonitorGeom) {
+    if !is_wayland() {
+        return;
+    }
+    let Some(window) = app.get_webview_window(&overlay_label(geom.id)) else {
+        return;
+    };
+    let (id, x, y) = (geom.id, geom.x, geom.y);
+    let target = window.clone();
+    let _ = window.run_on_main_thread(move || {
+        use gtk::prelude::*;
+        let Ok(gtk_window) = target.gtk_window() else {
+            return;
+        };
+        let Some(screen) = GtkWindowExt::screen(&gtk_window) else {
+            return;
+        };
+        let display = screen.display();
+        let index = (0..display.n_monitors()).find(|&i| {
+            display.monitor(i).is_some_and(|m| {
+                let g = m.geometry();
+                (g.x(), g.y()) == (x, y)
+            })
+        });
+        match index {
+            Some(index) => {
+                debug::log(format!("overlay {id} -> GDK monitor {index}"));
+                gtk_window.fullscreen_on_monitor(&screen, index);
+            }
+            None => debug::log(format!("overlay {id}: no GDK monitor at ({x}, {y})")),
+        }
+    });
+}
+
+#[cfg(not(all(target_os = "linux", not(test))))]
+pub fn pin_overlay<R: Runtime>(_app: &AppHandle<R>, _geom: &MonitorGeom) {}
+
 pub fn show_overlay<R: Runtime>(app: &AppHandle<R>, monitor_id: u32) {
     if let Some(window) = app.get_webview_window(&overlay_label(monitor_id)) {
         let _ = window.show();
@@ -153,6 +196,26 @@ pub fn hide_overlays<R: Runtime>(app: &AppHandle<R>) {
             let _ = window.hide();
         }
     }
+}
+
+/// The review window of a finished recording (`video`).
+pub fn open_video<R: Runtime>(app: &AppHandle<R>) -> Result<(), String> {
+    if let Some(window) = app.get_webview_window(VIDEO) {
+        let _ = window.unminimize();
+        let _ = window.show();
+        let _ = window.set_focus();
+        return window.emit("video:reload", ()).map_err(|e| e.to_string());
+    }
+    debug::log("opening video window");
+    WebviewWindowBuilder::new(app, VIDEO, WebviewUrl::App("index.html".into()))
+        .title("Socorin Recording")
+        .inner_size(980.0, 700.0)
+        .min_inner_size(640.0, 460.0)
+        .center()
+        .visible(true)
+        .build()
+        .map(|_| ())
+        .map_err(|e| format!("cannot open the video window: {e}"))
 }
 
 pub fn open_editor<R: Runtime>(app: &AppHandle<R>) -> Result<(), String> {
@@ -599,6 +662,7 @@ mod tests {
                 session: 1,
                 preselect_full: false,
                 mode: Mode::Screenshot,
+                span: false,
             })
             .collect();
         start_overlays(&app, &infos);

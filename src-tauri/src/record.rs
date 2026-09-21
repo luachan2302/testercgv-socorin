@@ -5,7 +5,8 @@
 //! Windows records in-process with Windows.Graphics.Capture and Media
 //! Foundation (`wgc`), with `ffmpeg` as the fallback (and as the recorder
 //! when Settings → Recording names one). Linux (X11) uses `ffmpeg` (see
-//! `ffmpeg_binary` for where it is looked for). One recording at a time:
+//! `ffmpeg_binary` for where it is looked for); on Wayland the ScreenCast
+//! portal and GStreamer record a whole monitor (`screencast`). One recording at a time:
 //! starting again stops the running one, stopping finalises the file,
 //! reveals it in the file manager and reports `capture-done`.
 //!
@@ -68,6 +69,12 @@ impl Area {
             width: monitor.width as f64,
             height: monitor.height as f64,
         }
+    }
+
+    /// The whole monitor, as `full` makes it.
+    #[cfg(target_os = "linux")]
+    fn is_full(&self) -> bool {
+        self.x == 0.0 && self.y == 0.0 && self.width == self.monitor.width as f64 && self.height == self.monitor.height as f64
     }
 
     /// Global logical coordinates (what macOS' `screencapture -R` expects).
@@ -155,6 +162,8 @@ pub(crate) struct Active {
 /// the in-process Windows recorder.
 pub(crate) enum Backend {
     Process(Child),
+    #[cfg(target_os = "linux")]
+    Screencast(crate::screencast::Recorder),
     #[cfg(windows)]
     Native(wgc::Recorder),
 }
@@ -164,21 +173,9 @@ impl Backend {
     /// finalise the file. A process that will not stop is killed.
     fn finish(self, timeout: Duration) -> Result<(), String> {
         match self {
-            Backend::Process(mut child) => {
-                signal_stop(&mut child);
-                let deadline = Instant::now() + timeout;
-                loop {
-                    match child.try_wait() {
-                        Ok(Some(_)) => return Ok(()),
-                        Ok(None) if Instant::now() < deadline => std::thread::sleep(Duration::from_millis(50)),
-                        _ => {
-                            let _ = child.kill();
-                            let _ = child.wait();
-                            return Err("the encoder did not exit and was killed".into());
-                        }
-                    }
-                }
-            }
+            Backend::Process(child) => finish_child(child, timeout),
+            #[cfg(target_os = "linux")]
+            Backend::Screencast(recorder) => recorder.finish(timeout),
             #[cfg(windows)]
             Backend::Native(recorder) => recorder.stop(timeout),
         }
@@ -193,8 +190,28 @@ impl Backend {
                 let _ = child.kill();
                 let _ = child.wait();
             }
+            #[cfg(target_os = "linux")]
+            Backend::Screencast(recorder) => recorder.abandon(),
             #[cfg(windows)]
             Backend::Native(recorder) => recorder.abandon(),
+        }
+    }
+}
+
+/// Asks an encoder process to finish and waits, `timeout` at most, for it
+/// to finalise the file; one that will not stop is killed.
+pub(crate) fn finish_child(mut child: Child, timeout: Duration) -> Result<(), String> {
+    signal_stop(&mut child);
+    let deadline = Instant::now() + timeout;
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) => return Ok(()),
+            Ok(None) if Instant::now() < deadline => std::thread::sleep(Duration::from_millis(50)),
+            _ => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err("the encoder did not exit and was killed".into());
+            }
         }
     }
 }
@@ -206,6 +223,10 @@ pub struct RecordState {
     starting: AtomicBool,
     /// Stop / cancel arrived while starting: undo right after the spawn.
     abort: AtomicBool,
+    /// Wayland: the recording that is starting asks which monitor to record
+    /// (Record), instead of taking the remembered one (Record Full Screen).
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+    ask_monitor: AtomicBool,
 }
 
 /// What the floating bar shows.
@@ -254,6 +275,15 @@ pub fn is_recording<R: Runtime>(app: &AppHandle<R>) -> bool {
 pub fn begin_region<R: Runtime>(app: AppHandle<R>) {
     if is_recording(&app) {
         stop_async(app);
+        return;
+    }
+    // Wayland has no region to offer (the portal hands out whole monitors):
+    // Record opens the system's screen chooser instead of the overlay. (Not
+    // in the tests, which must never reach the real portal.)
+    #[cfg(all(target_os = "linux", not(test)))]
+    if windows::is_wayland() {
+        app.state::<RecordState>().ask_monitor.store(true, Ordering::SeqCst);
+        begin_fullscreen(app);
         return;
     }
     capture::begin_session(app, false, capture::Mode::Record);
@@ -488,6 +518,12 @@ pub fn stop_with<R: Runtime>(app: &AppHandle<R>, outcome: Outcome) -> Result<Opt
         started,
         ..
     } = active;
+    // The Wayland recorder writes the container's header even when no frame
+    // arrived (the screen never changed meanwhile): that is no video.
+    #[cfg(target_os = "linux")]
+    let smallest_video: u64 = if matches!(backend, Backend::Screencast(_)) { 1024 } else { 1 };
+    #[cfg(not(target_os = "linux"))]
+    let smallest_video: u64 = 1;
     let finished = backend.finish(Duration::from_secs(20));
     if let Err(e) = &finished {
         eprintln!("[record] {e}");
@@ -505,12 +541,13 @@ pub fn stop_with<R: Runtime>(app: &AppHandle<R>, outcome: Outcome) -> Result<Opt
         .filter(|m| m.is_file())
         .map(|m| m.len())
         .unwrap_or(0);
-    if size == 0 {
+    if size < smallest_video {
         let _ = std::fs::remove_file(&path);
         windows::hide_recorder(app);
         let _ = app.emit("recording:stopped", Stopped { copied: false, link: None });
         return Err(match finished {
             Err(e) => format!("recording failed: {e}"),
+            Ok(()) if size > 0 => "Nothing was recorded: no picture arrived from that screen (it only sends one when something on it changes).".into(),
             Ok(()) => "recording failed: no video was written (is screen recording allowed?)".into(),
         });
     }
@@ -548,7 +585,8 @@ pub fn stop_with<R: Runtime>(app: &AppHandle<R>, outcome: Outcome) -> Result<Opt
         windows::hide_recorder_later(app, Duration::from_millis(if copied { 1500 } else { 2500 }));
     } else {
         windows::hide_recorder(app);
-        let _ = tauri_plugin_opener::reveal_item_in_dir(&path);
+        // A plain Stop: review (trim, crop, GIF) before anything else.
+        crate::video::open(app, &path);
     }
     let _ = app.emit("recording:stopped", Stopped { copied, link });
     let _ = app.emit("capture-done", path.to_string_lossy().into_owned());
@@ -687,7 +725,7 @@ fn reserve_mp4(source: &Path) -> Result<PathBuf, String> {
 /// A directory of our own next to `sibling` (same file system, so the
 /// finished file can be renamed into place), which must not exist yet and
 /// which only the user may enter.
-fn scratch_dir(sibling: &Path) -> Result<PathBuf, String> {
+pub(crate) fn scratch_dir(sibling: &Path) -> Result<PathBuf, String> {
     let dir = sibling.parent().unwrap_or(Path::new("."));
     for n in 0..1000 {
         let candidate = dir.join(format!(".socorin-remux-{}-{n}", std::process::id()));
@@ -753,7 +791,7 @@ pub(crate) fn configured_ffmpeg(configured: &str) -> Result<PathBuf, String> {
     }
 }
 
-fn quiet() -> Stdio {
+pub(crate) fn quiet() -> Stdio {
     if debug::options().enabled {
         Stdio::inherit()
     } else {
@@ -785,7 +823,7 @@ fn spawn_backend<R: Runtime>(_app: &AppHandle<R>, area: &Area, path: &Path, audi
 /// entry (or, on Windows, the working directory) supply an impostor. On
 /// macOS ffmpeg only converts recordings for uploading (Homebrew's
 /// locations are looked at); the recorder itself is `screencapture`.
-fn ffmpeg_binary<R: Runtime>(app: &AppHandle<R>) -> Result<PathBuf, String> {
+pub(crate) fn ffmpeg_binary<R: Runtime>(app: &AppHandle<R>) -> Result<PathBuf, String> {
     let configured = settings::current(app).ffmpeg_path;
     if !configured.is_empty() {
         return configured_ffmpeg(&configured);
@@ -830,7 +868,12 @@ fn ffmpeg_binary<R: Runtime>(app: &AppHandle<R>) -> Result<PathBuf, String> {
 #[cfg(target_os = "linux")]
 fn spawn_backend<R: Runtime>(app: &AppHandle<R>, area: &Area, path: &Path, audio: &mut audio::Choice) -> Result<Backend, String> {
     if windows::is_wayland() {
-        return Err("Screen recording needs an X11 session; Wayland is not supported yet.".into());
+        // The portal hands out whole monitors (the user picks which one).
+        if !area.is_full() {
+            return Err("On Wayland a whole screen is recorded: Record asks which one.".into());
+        }
+        let ask = app.state::<RecordState>().ask_monitor.swap(false, Ordering::SeqCst);
+        return crate::screencast::Recorder::start(app, ask, path, audio).map(Backend::Screencast);
     }
     spawn_ffmpeg(app, area, path, audio).map(Backend::Process)
 }

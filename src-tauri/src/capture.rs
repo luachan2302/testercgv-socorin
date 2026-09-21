@@ -85,12 +85,25 @@ pub struct MonitorInfo {
     /// monitor by itself instead of waiting for a drag.
     pub preselect_full: bool,
     pub mode: Mode,
+    /// "All screens" session: a drag may leave this monitor, and the
+    /// selection is then cut out of the stitched desktop (`finish_span`).
+    pub span: bool,
 }
 
 pub struct MonitorShot {
     pub geom: MonitorGeom,
     /// Physical pixels.
     pub image: RgbaImage,
+}
+
+/// A selection in desktop logical units (the space `MonitorGeom` lives in);
+/// it may cover several monitors.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+pub struct SpanRect {
+    pub x: f64,
+    pub y: f64,
+    pub width: f64,
+    pub height: f64,
 }
 
 /// A region inside a monitor bitmap, in physical pixels.
@@ -116,6 +129,8 @@ pub struct AppState {
     pub annotating: AtomicBool,
     /// The session picks an area to record rather than to screenshot.
     pub record_mode: AtomicBool,
+    /// The session lets a selection span several monitors.
+    pub span_mode: AtomicBool,
     pub session: AtomicU64,
     /// When the current session started (for latency diagnostics).
     pub started: Mutex<Option<Instant>>,
@@ -215,6 +230,44 @@ fn crop(img: &RgbaImage, r: Region) -> Result<RgbaImage, String> {
     Ok(xcap::image::imageops::crop_imm(img, x, y, w, h).to_image())
 }
 
+/// Lay the monitor bitmaps out as they sit on the desktop. The result is in
+/// the pixels of the densest monitor, so nothing loses detail; a monitor
+/// with a lower scale factor is enlarged to match. Desktop areas no monitor
+/// covers stay transparent.
+fn stitch(shots: &[MonitorShot]) -> Result<Desktop, String> {
+    let scale = shots.iter().map(|s| s.geom.scale).fold(0.1_f32, f32::max);
+    let px = |logical: i64| (logical as f32 * scale).round() as i64;
+    let left = shots.iter().map(|s| i64::from(s.geom.x)).min().ok_or("no monitor")?;
+    let top = shots.iter().map(|s| i64::from(s.geom.y)).min().ok_or("no monitor")?;
+    let right = shots.iter().map(|s| i64::from(s.geom.x) + i64::from(s.geom.width)).max().ok_or("no monitor")?;
+    let bottom = shots.iter().map(|s| i64::from(s.geom.y) + i64::from(s.geom.height)).max().ok_or("no monitor")?;
+    let (width, height) = (px(right - left), px(bottom - top));
+    if width <= 0 || height <= 0 {
+        return Err("empty desktop".into());
+    }
+
+    let mut desktop = RgbaImage::new(width as u32, height as u32);
+    for s in shots {
+        let (x, y) = (px(i64::from(s.geom.x) - left), px(i64::from(s.geom.y) - top));
+        let (w, h) = (px(i64::from(s.geom.width)).max(1) as u32, px(i64::from(s.geom.height)).max(1) as u32);
+        if (s.image.width(), s.image.height()) == (w, h) {
+            xcap::image::imageops::replace(&mut desktop, &s.image, x, y);
+        } else {
+            let resized = xcap::image::imageops::resize(&s.image, w, h, xcap::image::imageops::FilterType::Lanczos3);
+            xcap::image::imageops::replace(&mut desktop, &resized, x, y);
+        }
+    }
+    Ok(Desktop { image: desktop, left, top, scale })
+}
+
+/// Every monitor in one bitmap, and how desktop logical units map to it.
+struct Desktop {
+    image: RgbaImage,
+    left: i64,
+    top: i64,
+    scale: f32,
+}
+
 #[cfg(target_os = "macos")]
 pub(crate) fn ensure_permission<R: Runtime>(app: &AppHandle<R>) -> Result<(), String> {
     if let Some(issue) = crate::macos::install_issue() {
@@ -250,12 +303,16 @@ pub fn begin_region<R: Runtime>(app: AppHandle<R>) {
 /// overlay skip the drag and go straight to annotating the whole screen;
 /// `Mode::Record` makes the overlay offer to record the selection instead.
 pub(crate) fn begin_session<R: Runtime>(app: AppHandle<R>, preselect_full: bool, mode: Mode) {
+    begin_session_with(app, preselect_full, mode, false);
+}
+
+fn begin_session_with<R: Runtime>(app: AppHandle<R>, preselect_full: bool, mode: Mode, span: bool) {
     std::thread::spawn(move || {
         let state = app.state::<AppState>();
         if state.busy.swap(true, Ordering::SeqCst) {
             return;
         }
-        if let Err(e) = begin_region_inner(&app, preselect_full, mode) {
+        if let Err(e) = begin_region_inner(&app, preselect_full, mode, span) {
             eprintln!("[capture] {e}");
             end_session(&app);
             let _ = app.emit("capture-error", e);
@@ -263,10 +320,11 @@ pub(crate) fn begin_session<R: Runtime>(app: AppHandle<R>, preselect_full: bool,
     });
 }
 
-fn begin_region_inner<R: Runtime>(app: &AppHandle<R>, preselect_full: bool, mode: Mode) -> Result<(), String> {
+fn begin_region_inner<R: Runtime>(app: &AppHandle<R>, preselect_full: bool, mode: Mode, span: bool) -> Result<(), String> {
     ensure_permission(app)?;
     let state = app.state::<AppState>();
     state.record_mode.store(mode == Mode::Record, Ordering::SeqCst);
+    state.span_mode.store(span, Ordering::SeqCst);
     let started = Instant::now();
     *state.started.lock().unwrap() = Some(started);
     let session = state.session.fetch_add(1, Ordering::SeqCst) + 1;
@@ -303,6 +361,7 @@ fn begin_region_inner<R: Runtime>(app: &AppHandle<R>, preselect_full: bool, mode
             session,
             preselect_full: full_target == Some(s.geom.id),
             mode,
+            span,
         })
         .collect();
     *state.shots.lock().unwrap() = shots;
@@ -391,15 +450,17 @@ fn spawn_cursor_tracker<R: Runtime>(app: AppHandle<R>, session: u64) {
 /// cursor tracker once the window is visible.
 pub fn overlay_ready<R: Runtime>(app: &AppHandle<R>, monitor_id: u32) {
     let state = app.state::<AppState>();
-    let known = state
+    let geom = state
         .shots
         .lock()
         .unwrap()
         .iter()
-        .any(|s| s.geom.id == monitor_id);
-    if !known {
+        .find(|s| s.geom.id == monitor_id)
+        .map(|s| s.geom.clone());
+    let Some(geom) = geom else {
         return; // session ended meanwhile
-    }
+    };
+    windows::pin_overlay(app, &geom);
     windows::show_overlay(app, monitor_id);
     let started = *state.started.lock().unwrap();
     if let Some(started) = started {
@@ -455,6 +516,58 @@ pub fn begin_fullscreen<R: Runtime>(app: AppHandle<R>) {
             let _ = app.emit("capture-error", e);
         }
     });
+}
+
+/// Region capture where the selection may span several monitors: a drag
+/// that leaves its overlay is mirrored on the others (`span_update`) and cut
+/// out of the stitched desktop (`finish_span`). A selection that stays on one
+/// monitor behaves like a plain region capture.
+pub fn begin_all_screens<R: Runtime>(app: AppHandle<R>) {
+    begin_session_with(app, false, Mode::Screenshot, true);
+}
+
+/// The overlay on `monitor_id` is dragging a selection that may reach other
+/// monitors: the other overlays draw their part of it (`None` = drag dropped).
+pub fn span_update<R: Runtime>(app: &AppHandle<R>, monitor_id: u32, rect: Option<SpanRect>) {
+    let sender = windows::overlay_label(monitor_id);
+    for s in app.state::<AppState>().shots.lock().unwrap().iter() {
+        let label = windows::overlay_label(s.geom.id);
+        if label != sender {
+            let _ = app.emit_to(EventTarget::webview_window(&label), "capture:span", rect);
+        }
+    }
+}
+
+/// A selection across monitors: cut it out of the stitched desktop. It
+/// cannot be annotated in place (no overlay covers it), so editor mode opens
+/// it in the editor window.
+pub fn finish_span<R: Runtime>(app: &AppHandle<R>, rect: SpanRect) -> Result<(), String> {
+    let png = {
+        let state = app.state::<AppState>();
+        let shots = state.shots.lock().unwrap();
+        if shots.is_empty() {
+            return Err("capture session expired".into());
+        }
+        let desktop = stitch(&shots)?;
+        let px = |logical: f64| (logical * f64::from(desktop.scale)).round().max(0.0) as u32;
+        let region = Region {
+            monitor_id: 0,
+            x: px(rect.x - desktop.left as f64),
+            y: px(rect.y - desktop.top as f64),
+            width: px(rect.width),
+            height: px(rect.height),
+        };
+        encode_png(&crop(&desktop.image, region)?)?
+    };
+    debug::log(format!("span {:?} -> {} bytes png", rect, png.len()));
+    end_session(app);
+    let anchor = crate::share::Anchor { x: rect.x, y: rect.y, width: rect.width, height: rect.height };
+    deliver(app, png, Some(anchor))
+}
+
+/// Whether the running session lets a selection span monitors.
+pub fn span<R: Runtime>(app: &AppHandle<R>) -> bool {
+    app.state::<AppState>().span_mode.load(Ordering::SeqCst)
 }
 
 /// Called by an overlay window once the user has drawn a rectangle.
@@ -513,6 +626,7 @@ fn end_session<R: Runtime>(app: &AppHandle<R>) {
     *state.started.lock().unwrap() = None;
     state.annotating.store(false, Ordering::SeqCst);
     state.record_mode.store(false, Ordering::SeqCst);
+    state.span_mode.store(false, Ordering::SeqCst);
     state.busy.store(false, Ordering::SeqCst);
 }
 
@@ -833,6 +947,65 @@ mod session_tests {
     }
 
     #[test]
+    fn stitch_lays_the_monitors_out_side_by_side_at_the_densest_scale() {
+        use xcap::image::Rgba;
+        let paint = |mut s: MonitorShot, c: [u8; 4]| {
+            s.image.pixels_mut().for_each(|p| *p = Rgba(c));
+            s
+        };
+        // Secondary monitor to the left of the primary (negative x) and lower.
+        let left = paint(shot(geom(2, -10, 4, 10, 6, 1.0, false)), [255, 0, 0, 255]);
+        let right = paint(shot(geom(1, 0, 0, 8, 8, 1.0, true)), [0, 0, 255, 255]);
+        let desktop = stitch(&[right, left]).unwrap().image;
+        assert_eq!((desktop.width(), desktop.height()), (18, 10));
+        assert_eq!(desktop.get_pixel(0, 4).0, [255, 0, 0, 255]);
+        assert_eq!(desktop.get_pixel(0, 0).0, [0, 0, 0, 0]); // no monitor there
+        assert_eq!(desktop.get_pixel(10, 0).0, [0, 0, 255, 255]);
+        assert_eq!(desktop.get_pixel(17, 7).0, [0, 0, 255, 255]);
+
+        // Mixed scale factors: the 1x monitor is enlarged to the 2x one.
+        let hidpi = paint(shot(geom(1, 0, 0, 4, 4, 2.0, true)), [0, 255, 0, 255]);
+        let plain = paint(shot(geom(2, 4, 0, 4, 4, 1.0, false)), [255, 0, 0, 255]);
+        let desktop = stitch(&[hidpi, plain]).unwrap().image;
+        assert_eq!((desktop.width(), desktop.height()), (16, 8));
+        assert_eq!(desktop.get_pixel(7, 7).0, [0, 255, 0, 255]);
+        assert_eq!(desktop.get_pixel(8, 0).0, [255, 0, 0, 255]);
+        assert_eq!(desktop.get_pixel(15, 7).0, [255, 0, 0, 255]);
+
+        assert!(stitch(&[]).is_err());
+    }
+
+    #[test]
+    fn finish_span_cuts_the_selection_out_of_the_whole_desktop() {
+        let dir = temp_dir("span");
+        let app = app_with(Settings { after_capture: AfterCapture::Save, ..settings_in(&dir) });
+        assert!(finish_span(&app, SpanRect { x: 0.0, y: 0.0, width: 4.0, height: 4.0 }).is_err()); // idle
+
+        let paint = |mut s: MonitorShot, c: [u8; 4]| {
+            s.image.pixels_mut().for_each(|p| *p = xcap::image::Rgba(c));
+            s
+        };
+        let left = paint(shot(geom(2, -10, 0, 10, 8, 1.0, false)), [255, 0, 0, 255]);
+        let right = paint(shot(geom(1, 0, 0, 10, 8, 1.0, true)), [0, 0, 255, 255]);
+        start_session(&app, vec![right, left]);
+        app.state::<AppState>().span_mode.store(true, Ordering::SeqCst);
+        assert!(span(&app));
+        span_update(&app, 1, Some(SpanRect { x: -4.0, y: 2.0, width: 8.0, height: 3.0 }));
+        span_update(&app, 1, None);
+
+        // Four columns of each monitor.
+        finish_span(&app, SpanRect { x: -4.0, y: 2.0, width: 8.0, height: 3.0 }).unwrap();
+        assert!(!is_busy(&app));
+        assert!(!span(&app));
+        let files: Vec<_> = std::fs::read_dir(&dir).unwrap().flatten().collect();
+        assert_eq!(files.len(), 1);
+        let image = xcap::image::load_from_memory(&std::fs::read(files[0].path()).unwrap()).unwrap().to_rgba8();
+        assert_eq!((image.width(), image.height()), (8, 3));
+        assert_eq!(image.get_pixel(3, 0).0, [255, 0, 0, 255]);
+        assert_eq!(image.get_pixel(4, 2).0, [0, 0, 255, 255]);
+    }
+
+    #[test]
     fn finish_region_saves_the_crop_and_ends_the_session() {
         let dir = temp_dir("capture-save");
         let app = app_with(Settings { after_capture: AfterCapture::Save, ..settings_in(&dir) });
@@ -976,6 +1149,7 @@ mod session_tests {
         begin_fullscreen(app.handle().clone()); // editor mode: annotate in place
         app.state::<SettingsState>().0.lock().unwrap().after_capture = AfterCapture::Clipboard;
         begin_fullscreen(app.handle().clone()); // immediate mode: worker thread
+        begin_all_screens(app.handle().clone());
         crate::record::begin_region(app.handle().clone());
         std::thread::sleep(std::time::Duration::from_millis(80));
         assert!(is_busy(&app));

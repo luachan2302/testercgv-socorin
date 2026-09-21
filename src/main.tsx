@@ -6,6 +6,7 @@ import { Overlay } from "./windows/Overlay";
 
 // The editor pulls in Konva; keep it out of the overlay's critical path.
 const Editor = lazy(() => import("./windows/Editor").then((m) => ({ default: m.Editor })));
+const VideoEditor = lazy(() => import("./windows/VideoEditor").then((m) => ({ default: m.VideoEditor })));
 const Settings = lazy(() => import("./windows/Settings").then((m) => ({ default: m.Settings })));
 const Welcome = lazy(() => import("./windows/Welcome").then((m) => ({ default: m.Welcome })));
 const Recorder = lazy(() => import("./windows/Recorder").then((m) => ({ default: m.Recorder })));
@@ -24,6 +25,13 @@ function Root({ label }: { label: string }) {
     return (
       <Suspense fallback={null}>
         <Editor />
+      </Suspense>
+    );
+  }
+  if (kind === "video") {
+    return (
+      <Suspense fallback={null}>
+        <VideoEditor />
       </Suspense>
     );
   }

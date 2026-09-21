@@ -9,6 +9,7 @@ type Handler = (args: unknown, options?: unknown) => Promise<unknown>;
 let settings = {
   hotkey: "CmdOrCtrl+Shift+A",
   fullscreenHotkey: "",
+  allScreensHotkey: "",
   recordHotkey: "",
   saveDir: "/Users/mock/Pictures/Screenshots",
   afterCapture: "editor",
@@ -127,7 +128,7 @@ const monitor = () => {
 };
 
 const handlers: Record<string, Handler> = {
-  overlay_info: async () => ({ ...monitor(), session: 1, preselectFull: !!new URLSearchParams(location.search).get("full"), mode: (new URLSearchParams(location.search).get("record") ? "record" : "screenshot") }),
+  overlay_info: async () => ({ ...monitor(), session: 1, preselectFull: !!new URLSearchParams(location.search).get("full"), mode: (new URLSearchParams(location.search).get("record") ? "record" : "screenshot"), span: false }),
   begin_annotation: async (args) => console.log("[mock] begin_annotation", JSON.stringify(args)),
   cancel_capture: async () => {
     console.log("[mock] cancel_capture → reload");

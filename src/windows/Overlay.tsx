@@ -1,7 +1,7 @@
 import { lazy, Suspense, useCallback, useEffect, useRef, useState } from "react";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
-import { ipc, type Bar, type CaptureMode, type MonitorInfo, type Settings } from "../lib/ipc";
+import { ipc, type Bar, type CaptureMode, type MonitorInfo, type Settings, type SpanRect } from "../lib/ipc";
 import type { Crop } from "./InPlaceEditor";
 import { RecordBar } from "./RecordBar";
 
@@ -45,6 +45,11 @@ function hitHandle(r: Rect, p: Point): Handle | null {
     if (Math.abs(p.x - hp.x) <= tolerance && Math.abs(p.y - hp.y) <= tolerance) return id;
   }
   return null;
+}
+
+/** Whether part of `r` lies outside this window, i.e. on another monitor. */
+function leavesWindow(r: Rect): boolean {
+  return r.x < 0 || r.y < 0 || r.x + r.w > window.innerWidth || r.y + r.h > window.innerHeight;
 }
 
 function inside(r: Rect, p: Point): boolean {
@@ -123,6 +128,9 @@ export function Overlay({ monitorId }: { monitorId: number }) {
   const peerLockRef = useRef(false); // another monitor's overlay is annotating
   const inPlaceRef = useRef(true);
   const modeRef = useRef<CaptureMode>("screenshot");
+  const spanRef = useRef(false); // "all screens": a drag may leave this monitor
+  const spanSentRef = useRef(false); // the other overlays are drawing our drag
+  const peerDragRef = useRef<Rect | null>(null); // another overlay's drag, in our coordinates
   const autoSelectRef = useRef<[number, number, number, number] | null>(null);
   const diagRef = useRef({ debug: false, sawMouseMove: false, sawCursorEvent: false });
   const [ready, setReady] = useState(false);
@@ -157,6 +165,13 @@ export function Overlay({ monitorId }: { monitorId: number }) {
     },
     [imageScale],
   );
+
+  /** A CSS rectangle of this window in desktop logical units. */
+  const toDesktop = useCallback((rect: Rect): SpanRect => {
+    const info = infoRef.current!;
+    const k = info.width / window.innerWidth;
+    return { x: info.x + rect.x * k, y: info.y + rect.y * k, width: rect.w * k, height: rect.h * k };
+  }, []);
 
   const setCursor = useCallback((cursor: string) => {
     const el = rootRef.current;
@@ -213,7 +228,8 @@ export function Overlay({ monitorId }: { monitorId: number }) {
       return;
     }
 
-    const rect = dragRef.current ? normalize(dragRef.current) : null;
+    const own = dragRef.current ? normalize(dragRef.current) : null;
+    const rect = own ?? peerDragRef.current;
     if (rect && rect.w > 0 && rect.h > 0) {
       ctx.beginPath();
       ctx.rect(0, 0, w, h);
@@ -222,9 +238,11 @@ export function Overlay({ monitorId }: { monitorId: number }) {
       ctx.strokeStyle = "rgba(255,255,255,0.95)";
       ctx.lineWidth = 1;
       ctx.strokeRect(rect.x + 0.5, rect.y + 0.5, Math.max(0, rect.w - 1), Math.max(0, rect.h - 1));
-      const label = `${Math.round(rect.w * sx)} × ${Math.round(rect.h * sy)}`;
-      const ly = rect.y >= 26 ? rect.y - 24 : rect.y + rect.h + 4;
-      drawLabel(ctx, label, rect.x, Math.min(ly, h - 24));
+      if (own) {
+        const label = `${Math.round(rect.w * sx)} × ${Math.round(rect.h * sy)}`;
+        const ly = rect.y >= 26 ? rect.y - 24 : rect.y + rect.h + 4;
+        drawLabel(ctx, label, Math.max(0, rect.x), Math.max(0, Math.min(ly, h - 24)));
+      }
     } else {
       ctx.fillRect(0, 0, w, h);
       const cur = cursorRef.current;
@@ -268,6 +286,20 @@ export function Overlay({ monitorId }: { monitorId: number }) {
       });
     },
     [cropOf, monitorId],
+  );
+
+  /** The selection covers other monitors too: Rust cuts it out of the whole desktop. */
+  const finishSpan = useCallback(
+    (rect: Rect) => {
+      if (finishedRef.current) return;
+      finishedRef.current = true;
+      ipc.finishSpan(toDesktop(rect)).catch((e) => {
+        console.error(e);
+        finishedRef.current = false;
+        setError(String(e));
+      });
+    },
+    [toDesktop],
   );
 
   /** Make `rect` the final selection (state only; nothing is drawn or told to Rust). */
@@ -358,6 +390,9 @@ export function Overlay({ monitorId }: { monitorId: number }) {
     peerLockRef.current = false;
     phaseRef.current = "idle";
     modeRef.current = "screenshot";
+    spanRef.current = false;
+    spanSentRef.current = false;
+    peerDragRef.current = null;
     const canvas = canvasRef.current;
     if (canvas) {
       canvas.width = 0;
@@ -387,6 +422,9 @@ export function Overlay({ monitorId }: { monitorId: number }) {
       peerLockRef.current = false;
       phaseRef.current = "select";
       modeRef.current = info.mode;
+      spanRef.current = info.span;
+      spanSentRef.current = false;
+      peerDragRef.current = null;
       diagRef.current.sawMouseMove = false;
       diagRef.current.sawCursorEvent = false;
       setCursor("");
@@ -461,6 +499,18 @@ export function Overlay({ monitorId }: { monitorId: number }) {
         dragRef.current = null;
         setPeerLocked(true);
         setDragging(false);
+        scheduleDraw();
+      }),
+      // Another overlay's drag reaches (or left) this monitor.
+      self.listen<SpanRect | null>("capture:span", (e) => {
+        const info = infoRef.current;
+        const r = e.payload;
+        if (!info || !r) {
+          peerDragRef.current = null;
+        } else {
+          const k = window.innerWidth / info.width;
+          peerDragRef.current = { x: (r.x - info.x) * k, y: (r.y - info.y) * k, w: r.width * k, h: r.height * k };
+        }
         scheduleDraw();
       }),
       // Native cursor tracking from Rust: keeps the crosshair alive even when
@@ -553,7 +603,19 @@ export function Overlay({ monitorId }: { monitorId: number }) {
         void ipc.debugLog(`overlay ${monitorId} first DOM mousemove ${e.clientX},${e.clientY}`);
       }
       cursorRef.current = { x: e.clientX, y: e.clientY };
-      if (dragRef.current) dragRef.current.end = p;
+      if (dragRef.current) {
+        // "All screens": the drag goes on past the edge (the pressed button
+        // keeps the events coming here) and the other overlays mirror it.
+        dragRef.current.end = spanRef.current ? { x: e.clientX, y: e.clientY } : p;
+        if (spanRef.current) {
+          const rect = normalize(dragRef.current);
+          const out = leavesWindow(rect);
+          if (out || spanSentRef.current) {
+            spanSentRef.current = out;
+            void ipc.spanUpdate(monitorId, out ? toDesktop(rect) : null);
+          }
+        }
+      }
       scheduleDraw();
     };
     const onMouseUp = (e: MouseEvent) => {
@@ -570,7 +632,8 @@ export function Overlay({ monitorId }: { monitorId: number }) {
       if (!dragRef.current) return;
       const rect = normalize(dragRef.current);
       if (rect.w >= MIN_SIZE && rect.h >= MIN_SIZE) {
-        select(rect);
+        if (leavesWindow(rect)) finishSpan(rect);
+        else select(rect);
       } else {
         dragRef.current = null;
         setDragging(false);
@@ -609,7 +672,7 @@ export function Overlay({ monitorId }: { monitorId: number }) {
       window.removeEventListener("resize", onResize);
       document.documentElement.removeEventListener("mouseenter", onMouseEnter);
     };
-  }, [ready, cancel, select, cropOf, scheduleDraw, setCursor, monitorId]);
+  }, [ready, cancel, select, finishSpan, toDesktop, cropOf, scheduleDraw, setCursor, monitorId]);
 
   const { sx } = imageScale();
 
