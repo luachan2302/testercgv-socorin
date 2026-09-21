@@ -1,0 +1,200 @@
+import { useCallback, useEffect, useRef, useState } from "react";
+import { listen } from "@tauri-apps/api/event";
+import logo from "../assets/logo.svg";
+import { ipc, shareErrorMessage, type ShareNotice as Notice } from "../lib/ipc";
+
+/**
+ * How long the popover stays without anyone touching it (a hover holds it;
+ * once the user clicks into it, a click elsewhere closes it, see
+ * `shareEngaged`).
+ */
+export const LIFETIME_MS = 20_000;
+
+/** "60 days" / "1 day": the server's retention, or the days left when it did not say. */
+export function keptFor(expiresAt: string, retentionDays: number, now = Date.now()): string {
+  const at = Date.parse(expiresAt);
+  const days = retentionDays > 0 ? retentionDays : Number.isNaN(at) ? 0 : Math.max(1, Math.ceil((at - now) / 86_400_000));
+  return `${days} day${days === 1 ? "" : "s"}`;
+}
+
+/**
+ * The small popover next to the button that was clicked (under the menu
+ * bar / tray icon when there was none) after "Upload & copy link": the link
+ * that is now on the clipboard (Copy again / Delete from server) and when
+ * the server deletes the file, or why there is none. Rust shows the window
+ * once the first notice is on screen (`shareReady`); it goes away on Close,
+ * Escape, by itself after `LIFETIME_MS` (a hover holds it), or, once the
+ * user has clicked into it, on a click elsewhere.
+ */
+export function ShareNotice() {
+  const [notice, setNotice] = useState<Notice | null>(null);
+  const [status, setStatus] = useState<{ text: string; error?: boolean } | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [deleted, setDeleted] = useState(false);
+  const shown = useRef(false);
+  const timer = useRef<number | undefined>(undefined);
+  const hovering = useRef(false);
+  const engaged = useRef(false);
+
+  const dismiss = useCallback(() => void ipc.dismissShare(), []);
+  // The first click into the popover: from now on a click elsewhere closes it.
+  const engage = useCallback(() => {
+    if (engaged.current) return;
+    engaged.current = true;
+    void ipc.shareEngaged();
+  }, []);
+
+  const arm = useCallback(() => {
+    window.clearTimeout(timer.current);
+    timer.current = window.setTimeout(() => {
+      if (hovering.current) arm();
+      else dismiss();
+    }, LIFETIME_MS);
+  }, [dismiss]);
+
+  useEffect(() => {
+    const fresh = (n: Notice | null | undefined) => {
+      setNotice(n ?? null);
+      setStatus(null);
+      setDeleted(false);
+      engaged.current = false;
+      if (n) arm();
+    };
+    ipc.shareNotice().then(fresh).catch(() => {});
+    const unlisten = listen<Notice>("share:notice", (e) => fresh(e.payload));
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") {
+        e.preventDefault();
+        dismiss();
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => {
+      unlisten.then((f) => f());
+      window.removeEventListener("keydown", onKey);
+      window.clearTimeout(timer.current);
+    };
+  }, [arm, dismiss]);
+
+  useEffect(() => {
+    if (notice && !shown.current) {
+      shown.current = true;
+      void ipc.shareReady();
+    }
+  }, [notice]);
+
+  if (!notice) return null;
+
+  const run = async (fn: () => Promise<void>) => {
+    if (busy) return;
+    setBusy(true);
+    arm();
+    try {
+      await fn();
+    } catch (e) {
+      setStatus({ text: shareErrorMessage(e), error: true });
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  let body;
+  if (notice.kind === "failed") {
+    body = (
+      <>
+        <h1>Could not upload</h1>
+        <p>{notice.error.message}</p>
+        {notice.error.serverMessage && (
+          // The server's own words, kept apart from Socorin's: a share
+          // server does not get to write the app's messages for it.
+          <p className="share-server-said">
+            <span>The server said:</span> <q>{notice.error.serverMessage}</q>
+          </p>
+        )}
+        <div className="row">
+          <button type="button" onClick={dismiss}>
+            Close
+          </button>
+        </div>
+      </>
+    );
+  } else if (deleted) {
+    body = (
+      <>
+        <h1>Deleted from server</h1>
+        <p>The link no longer works.</p>
+        <div className="row">
+          <button type="button" onClick={dismiss}>
+            Close
+          </button>
+        </div>
+      </>
+    );
+  } else {
+    const { link, retentionDays } = notice;
+    body = (
+      <>
+        <h1>Link copied</h1>
+        <code className="share-link" title={link.shareUrl}>
+          {link.shareUrl}
+        </code>
+        {status ? (
+          <p>{status.text}</p>
+        ) : (
+          <p className="share-warning">
+            Anyone with the link can open the file.{" "}
+            <strong>It is deleted from the server after {keptFor(link.expiresAt, retentionDays)} at the latest.</strong>
+          </p>
+        )}
+        <div className="row">
+          <button
+            type="button"
+            title="Copy the link again"
+            disabled={busy}
+            onClick={() =>
+              void run(async () => {
+                await ipc.copyShareLink(link.id);
+                setStatus({ text: "Copied again." });
+              })
+            }
+          >
+            Copy
+          </button>
+          <button
+            type="button"
+            className="secondary danger"
+            disabled={busy}
+            onClick={() =>
+              void run(async () => {
+                await ipc.deleteShare(link.id);
+                setDeleted(true);
+              })
+            }
+          >
+            {busy ? "Working…" : "Delete from server"}
+          </button>
+          <button type="button" className="secondary" onClick={dismiss}>
+            Close
+          </button>
+        </div>
+      </>
+    );
+  }
+
+  return (
+    <div
+      className="update-notice share-notice"
+      onMouseDown={engage}
+      onMouseEnter={() => {
+        hovering.current = true;
+      }}
+      onMouseLeave={() => {
+        hovering.current = false;
+        arm();
+      }}
+    >
+      <img className="update-logo" src={logo} alt="" width={40} height={40} draggable={false} />
+      <div className="update-body">{body}</div>
+    </div>
+  );
+}

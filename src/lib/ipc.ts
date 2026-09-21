@@ -1,0 +1,379 @@
+import { invoke } from "@tauri-apps/api/core";
+
+export interface MonitorInfo {
+  id: number;
+  name: string;
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+  scale: number;
+  primary: boolean;
+  imageWidth: number;
+  imageHeight: number;
+  /** Capture session counter; overlays ignore repeated signals for the same session. */
+  session: number;
+  /** Full-screen capture in annotate mode: select the whole monitor at once. */
+  preselectFull: boolean;
+  /** What the session is for: a screenshot, or picking an area to record. */
+  mode: CaptureMode;
+  /** "All screens" session: a drag may continue onto the other monitors. */
+  span: boolean;
+}
+
+/** A rectangle of a recording's picture, in video pixels. */
+export interface VideoCrop {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+}
+
+/** What the review window keeps of a recording (`start` / `end` in seconds). */
+export interface VideoEdit {
+  start: number;
+  end: number;
+  crop: VideoCrop | null;
+  mute: boolean;
+  format: "mp4" | "gif";
+  /** When each annotation layer (sent before with `videoLayerAdd`, same order) is on screen. */
+  layers: { from: number; to: number }[];
+}
+
+/** A selection in desktop logical units; it may cover several monitors. */
+export interface SpanRect {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+}
+
+export type CaptureMode = "screenshot" | "record";
+
+export interface RecordingStatus {
+  recording: boolean;
+  /** Unix time in ms when the recording started (0 when idle). */
+  startedMs: number;
+  path: string;
+  /** The microphone being recorded (its name); null = no sound. */
+  audio?: string | null;
+  /** Why there is no sound, or why another microphone than the chosen one is recorded. */
+  audioIssue?: string | null;
+}
+
+/** One microphone, as `audio_inputs` lists them. */
+export interface AudioInput {
+  /** The platform's id for it; what `micDevice` stores. */
+  id: string;
+  name: string;
+  /** The system's default input right now. */
+  default: boolean;
+}
+
+/** Payload of `recording:stopped`. */
+export interface RecordingStopped {
+  /** The file went to the clipboard (Stop & copy). */
+  copied: boolean;
+  /** The share link, after Stop & upload. */
+  link?: string | null;
+}
+
+/**
+ * Where the overlay's Record bar is, in CSS pixels of the overlay window
+ * (= logical pixels from the monitor's top-left corner). The recording bar
+ * window is placed there.
+ */
+export interface Bar {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+}
+
+/**
+ * Transparent room the recording bar's window keeps around the bar for its
+ * shadow; the bar is drawn this far from the window's edges. Must match
+ * `RECORDER_MARGIN` in `src-tauri/src/windows.rs`.
+ */
+export const RECORDER_MARGIN = 20;
+
+/** A region of a monitor bitmap, in physical pixels. */
+export interface Region {
+  monitorId: number;
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+}
+
+export type AfterCapture = "editor" | "clipboard" | "save" | "upload";
+
+export interface Settings {
+  hotkey: string;
+  fullscreenHotkey: string;
+  /** Region capture whose selection may span several monitors. Empty = disabled. */
+  allScreensHotkey: string;
+  /** Starts a region recording, or stops the running one. Empty = disabled. */
+  recordHotkey: string;
+  saveDir: string;
+  afterCapture: AfterCapture;
+  copyOnSave: boolean;
+  autostart: boolean;
+  /** Honour --capture / --capture-full / --capture-all / --record / --record-full on the command line. */
+  cliTriggers: boolean;
+  filePrefix: string;
+  /**
+   * Linux: the ffmpeg binary for recording, empty = usual locations, then PATH.
+   * Windows: empty = the built-in recorder, a path = record with that ffmpeg.
+   */
+  ffmpegPath: string;
+  /** Record the microphone along with the screen (default on; the Record bar's mic button flips it). */
+  mic: boolean;
+  /** The microphone's id (`AudioInput.id`), "" = the system default at the time. */
+  micDevice: string;
+  /** The name that device had when chosen (shown while it is not connected). */
+  micDeviceName: string;
+  /** The first-launch welcome dialog has been dismissed. */
+  welcomeShown: boolean;
+  /** Last annotation colour (#rrggbb) and stroke level (1–5), kept across captures. */
+  annotationColor: string;
+  annotationStroke: number;
+  /** Look for a newer version on socorin.com once a day (default on). */
+  checkUpdates: boolean;
+  /** Install a newer version as soon as the daily check finds one (default off). */
+  autoUpdate: boolean;
+  /** Unix seconds of the last successful update check, 0 = never. */
+  updateCheckedAt: number;
+  /** Newer version the last check found, "" = none. */
+  updateAvailable: string;
+  /** Version that ran last time (an update was installed when it differs). */
+  lastVersion: string;
+  /** Where "Upload & copy link" sends captures: an http(s) origin, socorin.com by default. */
+  uploadServer: string;
+  /** The random id the share server gave this install ("" until the first upload). */
+  installId: string;
+}
+
+export type ShareKind = "image" | "video";
+
+/**
+ * A link, as every command and event hands it over: no delete token, which
+ * stays on the Rust side (deleting goes by `id`, `deleteShare`). This is
+ * what `upload_png` resolves to and what `share_history` lists.
+ */
+export interface SharedLink {
+  id: string;
+  shareUrl: string;
+  expiresAt: string;
+  kind: ShareKind;
+  mime: string;
+  size: number;
+  /** Unix seconds of the upload. */
+  createdAt: number;
+}
+
+/**
+ * Why an upload did not happen: the server's error code (`file_too_large`,
+ * `rate_limited`, `storage_full`, `unsupported_type`, …) or the app's own
+ * (`network`, `server`, `invalid_response`), with the sentence to show.
+ */
+export interface ShareError {
+  code: string;
+  /** Socorin's own sentence; never contains anything the server wrote. */
+  message: string;
+  /** What the server said for itself, cleaned and cut. Shown apart. */
+  serverMessage?: string;
+  maxBytes?: number;
+  retryAfterSeconds?: number;
+}
+
+/** What the "Link copied" popover shows (`share_notice`, event `share:notice`). */
+export type ShareNotice =
+  | { kind: "shared"; link: SharedLink; retentionDays: number }
+  | { kind: "failed"; error: ShareError };
+
+/**
+ * Where the "Link copied" popover goes: the button that was clicked (or the
+ * selection), as a rectangle in this window's CSS pixels. Rust makes it
+ * absolute (`windows::anchor_on_screen`) and puts the popover right under it.
+ */
+export interface Anchor {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+}
+
+/** The anchor for an element, e.g. a click's `currentTarget`. */
+export function anchorOf(el: Element): Anchor {
+  const r = el.getBoundingClientRect();
+  return { x: r.left, y: r.top, width: r.width, height: r.height };
+}
+
+/** The sentence for a rejected share command (a `ShareError`, or any other error). */
+export function shareErrorMessage(e: unknown): string {
+  if (e && typeof e === "object" && "message" in e && typeof (e as ShareError).message === "string") {
+    return (e as ShareError).message;
+  }
+  return String(e);
+}
+
+/** What the updater is doing (`update_status`, event `update:status`). */
+export type UpdatePhase =
+  | { phase: "idle" }
+  | { phase: "checking" }
+  | { phase: "installing"; received: number; total: number }
+  | { phase: "failed"; error: string };
+
+export interface UpdateStatus {
+  currentVersion: string;
+  /** A newer version that exists, "" when none is known. */
+  available: string;
+  /** Unix seconds of the last successful check, 0 = never. */
+  checkedAt: number;
+  phase: UpdatePhase;
+  /** First launch after an update: the popover says so once. */
+  justUpdated: boolean;
+}
+
+/** Where to get the new version by hand when there is no automatic update. */
+export const DOWNLOAD_URL = "https://socorin.com/#download";
+
+export interface PlatformInfo {
+  os: string;
+  screenPermission: boolean;
+  /** macOS: "granted" | "denied" | "undetermined" (never asked); elsewhere "unknown". */
+  micPermission: "granted" | "denied" | "undetermined" | "unknown";
+  wayland: boolean;
+  /** macOS: "disk-image" | "translocated" when this copy cannot be granted permissions. */
+  installIssue: "disk-image" | "translocated" | null;
+}
+
+export interface DebugOptions {
+  enabled: boolean;
+  dumpDir: string | null;
+  autoSelect: [number, number, number, number] | null;
+  autoAction: string | null;
+}
+
+export const ipc = {
+  debugOptions: () => invoke<DebugOptions>("debug_options"),
+  /** Appends to the Rust diagnostics log (no-op unless SOCORIN_DEBUG is set). */
+  debugLog: (message: string) => invoke<void>("debug_log", { message }),
+  platformInfo: () => invoke<PlatformInfo>("platform_info"),
+  requestScreenPermission: () => invoke<boolean>("request_screen_permission"),
+  openScreenPermissionSettings: () => invoke<void>("open_screen_permission_settings"),
+  /** macOS: Privacy & Security → Microphone. */
+  openMicPermissionSettings: () => invoke<void>("open_mic_permission_settings"),
+  /** The microphones this computer has right now. Never prompts. */
+  audioInputs: () => invoke<AudioInput[]>("audio_inputs"),
+  startCapture: () => invoke<void>("start_capture"),
+  startFullscreenCapture: () => invoke<void>("start_fullscreen_capture"),
+  cancelCapture: () => invoke<void>("cancel_capture"),
+  overlayInfo: (monitorId: number) => invoke<MonitorInfo>("overlay_info", { monitorId }),
+  overlayPixels: (monitorId: number) => invoke<ArrayBuffer>("overlay_pixels", { monitorId }),
+  /** The overlay has painted; Rust shows (and focuses) the window. */
+  overlayReady: (monitorId: number) => invoke<void>("overlay_ready", { monitorId }),
+  finishRegion: (region: Region) => invoke<void>("finish_region", { region }),
+  /** The recording under review. */
+  videoInfo: () => invoke<{ name: string; bytes: number }>("video_info"),
+  videoSource: () => invoke<ArrayBuffer>("video_source"),
+  /** Writes the edited copy (or GIF) next to the recording; resolves to its file name. */
+  videoExport: (edit: VideoEdit) => invoke<string>("video_export", { edit }),
+  /** A new export begins: drop the layers of the previous one. */
+  videoLayersClear: () => invoke<void>("video_layers_clear"),
+  /** One annotation layer: a transparent PNG as large as the picture. */
+  videoLayerAdd: (png: ArrayBuffer) => invoke<void>("video_layer_add", new Uint8Array(png)),
+  /**
+   * Uploads the last export (else the recording), copies the link and shows
+   * the popover at `anchor` (the Upload button). Rejects with a `ShareError`.
+   */
+  videoUpload: (anchor?: Anchor) =>
+    invoke<SharedLink>("video_upload", new Uint8Array(), anchor && { headers: { "x-socorin-anchor": JSON.stringify(anchor) } }),
+  videoReveal: () => invoke<void>("video_reveal"),
+  videoCopy: () => invoke<void>("video_copy"),
+  /** A drag that left this monitor, for the other overlays to draw (null = dropped). */
+  spanUpdate: (monitorId: number, rect: SpanRect | null) => invoke<void>("span_update", { monitorId, rect }),
+  /** The selection covers several monitors: cut it out of the whole desktop. */
+  finishSpan: (rect: SpanRect) => invoke<void>("finish_span", { rect }),
+  /** The overlay switched to in-place annotation for the selected region. */
+  beginAnnotation: (monitorId: number) => invoke<void>("begin_annotation", { monitorId }),
+  /** Ends the capture session (hides the overlays); same as cancelling. */
+  endCapture: () => invoke<void>("cancel_capture"),
+  /**
+   * Ends a running session, shows the system "Save as" dialog (in Rust: the
+   * page never names a destination) and writes the PNG. Resolves to the
+   * saved path, or null when the dialog was cancelled.
+   */
+  savePngAs: (png: Uint8Array) => invoke<string | null>("save_png_as", png),
+  /** Ends the session and opens the PNG in the editor window. */
+  editPng: (png: Uint8Array) => invoke<void>("edit_png", png),
+  pendingImage: () => invoke<ArrayBuffer>("pending_image"),
+  /** Saves PNG bytes to an auto-named file in the save dir. Returns the path. */
+  savePng: (png: Uint8Array) => invoke<string>("save_png", png),
+  copyPng: (png: Uint8Array) => invoke<void>("copy_png", png),
+  /** Pick an area on the overlay and record it (stops a running recording). */
+  startRecordRegion: () => invoke<void>("start_record_region"),
+  startRecordFullscreen: () => invoke<void>("start_record_fullscreen"),
+  /**
+   * The overlay chose the area (bitmap pixels): end the session and record
+   * it. `bar` is where the Record bar is, for the recording bar to take over.
+   */
+  startRecording: (region: Region, bar?: Bar) => invoke<void>("start_recording", { region, bar: bar ?? null }),
+  /** Stop and reveal the file. */
+  stopRecording: () => invoke<void>("stop_recording"),
+  /** Stop and put the file on the clipboard. */
+  stopRecordingCopy: () => invoke<void>("stop_recording_copy"),
+  /** Stop, upload the file to the share server and put the link on the clipboard. */
+  stopRecordingUpload: (anchor?: Anchor) => invoke<void>("stop_recording_upload", { anchor }),
+  /** Stop and delete the file. */
+  cancelRecording: () => invoke<void>("cancel_recording"),
+  recordingStatus: () => invoke<RecordingStatus>("recording_status"),
+  getSettings: () => invoke<Settings>("get_settings"),
+  /** Partial update: only the given keys change. Returns the resulting settings. */
+  updateSettings: (patch: Partial<Settings>) => invoke<Settings>("update_settings", { patch }),
+  /** The welcome page has rendered: show its window. */
+  welcomeReady: () => invoke<void>("welcome_ready"),
+  /** OK on the welcome dialog: remember it and close the window. */
+  dismissWelcome: () => invoke<void>("dismiss_welcome"),
+  defaultSaveDir: () => invoke<string>("default_save_dir"),
+  openSaveDir: () => invoke<void>("open_save_dir"),
+  showSettings: () => invoke<void>("show_settings"),
+  updateStatus: () => invoke<UpdateStatus>("update_status"),
+  /** Look for a new version right away; resolves once the check is done. */
+  checkForUpdates: () => invoke<UpdateStatus>("check_for_updates"),
+  /** Download, install and restart into the announced version. */
+  installUpdate: () => invoke<void>("install_update"),
+  /** Close the update popover (Later / OK / Escape). */
+  dismissUpdate: () => invoke<void>("dismiss_update"),
+  /** The update popover has rendered: show its window. */
+  updateReady: () => invoke<void>("update_ready"),
+  /**
+   * Uploads PNG bytes to the share server, puts the link on the clipboard
+   * and shows the popover. Rejects with a `ShareError`.
+   */
+  uploadPng: (png: Uint8Array, anchor?: Anchor) =>
+    invoke<SharedLink>("upload_png", png, anchor && { headers: { "x-socorin-anchor": JSON.stringify(anchor) } }),
+  /** The remembered links, newest first. */
+  shareHistory: () => invoke<SharedLink[]>("share_history"),
+  /** "Delete from server" for a remembered link. Rejects with a `ShareError`. */
+  deleteShare: (id: string) => invoke<void>("delete_share", { id }),
+  /** Put a remembered link on the clipboard again. */
+  copyShareLink: (id: string) => invoke<void>("copy_share_link", { id }),
+  /** Forget the install id; the next upload registers a new one. */
+  resetInstallId: () => invoke<Settings>("reset_install_id"),
+  shareNotice: () => invoke<ShareNotice | null>("share_notice"),
+  /** The share popover has rendered: show its window. */
+  shareReady: () => invoke<void>("share_ready"),
+  /** Close the share popover. */
+  dismissShare: () => invoke<void>("dismiss_share"),
+  /** The user clicked into the popover: a click elsewhere closes it from now on. */
+  shareEngaged: () => invoke<void>("share_engaged"),
+  quit: () => invoke<void>("quit"),
+};
+
+export function timestamp(): string {
+  const d = new Date();
+  const p = (n: number) => String(n).padStart(2, "0");
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}_${p(d.getHours())}-${p(d.getMinutes())}-${p(d.getSeconds())}`;
+}
