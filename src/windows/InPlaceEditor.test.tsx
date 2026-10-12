@@ -64,6 +64,31 @@ describe("InPlaceEditor", () => {
     expect(toolbar.style.left).toBe(`${1024 - 600 - 8}px`);
   });
 
+  it("lets the toolbar be dragged by its background, clamped to the screen, but not by its buttons", () => {
+    const { container } = mount();
+    const toolbar = container.querySelector(".floating-toolbar") as HTMLElement;
+    toolbar.getBoundingClientRect = () => ({ left: 8, top: 258, right: 608, bottom: 298, width: 600, height: 40, x: 8, y: 258, toJSON() {} });
+    // Grabbing a button does not move anything.
+    fireEvent.pointerDown(screen.getByTitle("Rectangle (R)"), { button: 0, pointerId: 1, clientX: 50, clientY: 270 });
+    fireEvent.pointerMove(toolbar, { pointerId: 1, clientX: 300, clientY: 400 });
+    expect(toolbar.style.top).toBe("258px");
+    // Grabbing the bar itself drags it, keeping the grab offset.
+    fireEvent.pointerDown(toolbar, { button: 0, pointerId: 2, clientX: 20, clientY: 268 });
+    expect(toolbar.classList.contains("dragging")).toBe(true);
+    fireEvent.pointerMove(toolbar, { pointerId: 2, clientX: 112, clientY: 410 });
+    expect(toolbar.style.left).toBe("100px");
+    expect(toolbar.style.top).toBe("400px");
+    // It never leaves the screen (1024 x 768, toolbar 600 x 40).
+    fireEvent.pointerMove(toolbar, { pointerId: 2, clientX: 2000, clientY: 2000 });
+    expect(toolbar.style.left).toBe(`${1024 - 600}px`);
+    expect(toolbar.style.top).toBe(`${768 - 40}px`);
+    fireEvent.pointerUp(toolbar, { pointerId: 2, clientX: 2000, clientY: 2000 });
+    expect(toolbar.classList.contains("dragging")).toBe(false);
+    // Released: further moves do nothing, and the toolbar stays where it was put.
+    fireEvent.pointerMove(toolbar, { pointerId: 2, clientX: 112, clientY: 410 });
+    expect(toolbar.style.left).toBe(`${1024 - 600}px`);
+  });
+
   it("locks the selection once a tool is active and unlocks when it is toggled off", () => {
     const { container, onLockChange } = mount();
     fireEvent.click(screen.getByTitle("Rectangle (R)"));

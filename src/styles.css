@@ -607,12 +607,25 @@ html[data-window="recorder"] body {
 .floating-toolbar {
   position: absolute;
   pointer-events: auto;
-  cursor: default;
+  /* Draggable by its background / logo; the controls keep their own cursor. */
+  cursor: grab;
+  touch-action: none;
+  user-select: none;
   /* Size must not depend on where the toolbar is put: an absolutely
      positioned box shrinks to the room left of its `left`, which near the
      right edge made it wrap, get re-measured, move, wrap differently… */
   width: max-content;
   max-width: calc(100vw - 16px);
+}
+
+.floating-toolbar.dragging,
+.floating-toolbar.dragging * {
+  cursor: grabbing !important;
+}
+
+.floating-toolbar button,
+.floating-toolbar input {
+  cursor: default;
 }
 
 .toolbar.floating {

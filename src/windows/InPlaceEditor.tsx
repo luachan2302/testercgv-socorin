@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type PointerEvent as ReactPointerEvent } from "react";
 import { ipc, shareErrorMessage, type Settings } from "../lib/ipc";
 import type { Anchor } from "../lib/ipc";
 import { isMac } from "../lib/hotkey";
@@ -52,6 +52,9 @@ export function InPlaceEditor({ source, crop, scale, hidden, onLockChange, setti
   const toastTimer = useRef<number | undefined>(undefined);
   const toolbarRef = useRef<HTMLDivElement>(null);
   const [toolbarSize, setToolbarSize] = useState({ w: 0, h: 0 });
+  /** Where the user dragged the toolbar to (viewport CSS px); null = automatic placement. */
+  const [dragPos, setDragPos] = useState<{ left: number; top: number } | null>(null);
+  const toolbarDrag = useRef<{ pointerId: number; dx: number; dy: number } | null>(null);
 
   // The selected pixels as their own bitmap (stage background + pixelate source).
   const image = useMemo(() => {
@@ -89,6 +92,12 @@ export function InPlaceEditor({ source, crop, scale, hidden, onLockChange, setti
     const vw = window.innerWidth;
     const vh = window.innerHeight;
     const { w, h } = toolbarSize;
+    if (dragPos) {
+      return {
+        left: Math.max(0, Math.min(dragPos.left, vw - w)),
+        top: Math.max(0, Math.min(dragPos.top, vh - h)),
+      };
+    }
     let top = box.top + box.height + GAP;
     if (top + h > vh - GAP) {
       top = box.top - GAP - h;
@@ -96,7 +105,30 @@ export function InPlaceEditor({ source, crop, scale, hidden, onLockChange, setti
     }
     const left = Math.max(GAP, Math.min(box.left + box.width - w, vw - w - GAP));
     return { left, top };
-  }, [box.left, box.top, box.width, box.height, toolbarSize]);
+  }, [box.left, box.top, box.width, box.height, toolbarSize, dragPos]);
+
+  // ---- toolbar dragging: grab it anywhere but on a control (logo, gaps, edges) ----
+  const onToolbarPointerDown = (e: ReactPointerEvent<HTMLDivElement>) => {
+    if (e.button !== 0) return;
+    if (e.target instanceof Element && e.target.closest("button, input, .inplace-toast")) return;
+    const r = e.currentTarget.getBoundingClientRect();
+    toolbarDrag.current = { pointerId: e.pointerId, dx: e.clientX - r.left, dy: e.clientY - r.top };
+    e.currentTarget.setPointerCapture?.(e.pointerId);
+    e.currentTarget.classList.add("dragging");
+    e.preventDefault();
+  };
+  const onToolbarPointerMove = (e: ReactPointerEvent<HTMLDivElement>) => {
+    const d = toolbarDrag.current;
+    if (!d || d.pointerId !== e.pointerId) return;
+    setDragPos({ left: e.clientX - d.dx, top: e.clientY - d.dy });
+  };
+  const onToolbarPointerUp = (e: ReactPointerEvent<HTMLDivElement>) => {
+    const d = toolbarDrag.current;
+    if (!d || d.pointerId !== e.pointerId) return;
+    toolbarDrag.current = null;
+    e.currentTarget.releasePointerCapture?.(e.pointerId);
+    e.currentTarget.classList.remove("dragging");
+  };
 
   // ---- actions ----
   const notify = useCallback((text: string, info = false) => {
@@ -227,7 +259,16 @@ export function InPlaceEditor({ source, crop, scale, hidden, onLockChange, setti
       <div className="inplace-stage" style={{ ...box, pointerEvents: a.tool === null ? "none" : "auto" }}>
         <AnnotationStage a={a} image={image} width={crop.width} height={crop.height} scale={scale} />
       </div>
-      <div ref={toolbarRef} className="floating-toolbar" style={toolbarPos}>
+      <div
+        ref={toolbarRef}
+        className="floating-toolbar"
+        style={toolbarPos}
+        title="Drag to move"
+        onPointerDown={onToolbarPointerDown}
+        onPointerMove={onToolbarPointerMove}
+        onPointerUp={onToolbarPointerUp}
+        onPointerCancel={onToolbarPointerUp}
+      >
         <Toolbar
           floating
           tool={a.tool}
